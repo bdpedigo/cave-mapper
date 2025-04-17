@@ -1,3 +1,5 @@
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 import point_cloud_utils as pcu
@@ -5,7 +7,7 @@ from caveclient import CAVEclient
 from cloudvolume import CloudVolume
 
 
-def _get_vertex_order(mesh):
+def _get_vertex_order(mesh: tuple) -> str:
     """
     Determine the order of the vertices in the mesh.
     """
@@ -17,7 +19,7 @@ def _get_vertex_order(mesh):
     return v_order
 
 
-def find_closest_points_on_mesh(points, mesh):
+def find_closest_points_on_mesh(points: np.ndarray, mesh: tuple) -> np.ndarray:
     vertices = mesh[0]
     v_order = _get_vertex_order(mesh)
     faces = mesh[1]
@@ -39,7 +41,7 @@ def find_closest_points_on_mesh(points, mesh):
     return closest_pts
 
 
-def cast_points_to_chunked(points, cv):
+def cast_points_to_chunked(points: np.ndarray, cv: CloudVolume) -> np.ndarray:
     """
     Cast points to the chunked representation of the mesh.
     """
@@ -49,7 +51,12 @@ def cast_points_to_chunked(points, cv):
     return points_cast
 
 
-def scattered_points(points, cv, client):
+def scattered_points(
+    points: np.ndarray,
+    cv: CloudVolume,
+    client: CAVEclient,
+    root_id: Optional[int] = None,
+) -> pd.DataFrame:
     out = cv.scattered_points(
         points, coord_resolution=cv.meta.resolution(0), agglomerate=False
     )
@@ -69,14 +76,22 @@ def scattered_points(points, cv, client):
         .drop(columns=["point"])
     )
 
-    root_lookups = client.chunkedgraph.get_roots(scatter_df["supervoxel_id"].values)
+    # TODO add a timestamp lookup here and pass it into get_roots
+    if root_id is not None:
+        timestamp = client.chunkedgraph.get_root_timestamps(root_id, latest=True)[0]
+    else:
+        timestamp = None
+
+    root_lookups = client.chunkedgraph.get_roots(
+        scatter_df["supervoxel_id"].values, timestamp=timestamp
+    )
 
     scatter_df["root_id"] = root_lookups
 
     return scatter_df
 
 
-def construct_neighbor_elements(max_x, max_y, max_z):
+def construct_neighbor_elements(max_x, max_y, max_z) -> np.ndarray:
     xs, ys, zs = np.nonzero(
         np.ones((1 + 2 * max_x, 1 + 2 * max_y, 1 + 2 * max_z), dtype=bool)
     )
@@ -87,7 +102,9 @@ def construct_neighbor_elements(max_x, max_y, max_z):
     return neighbors
 
 
-def construct_lookup_points(cast_closest_points, neighbors):
+def construct_lookup_points(
+    cast_closest_points: np.ndarray, neighbors: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
     lookup_matrix = np.repeat(
         cast_closest_points.reshape((*cast_closest_points.shape, 1)),
         len(neighbors),
@@ -167,9 +184,9 @@ def map_points_via_mesh(
     )[root_id]
 
     mesh = (raw_mesh.vertices, raw_mesh.faces)
-    vertices = mesh[0]
+    vertices: np.ndarray = mesh[0]
     v_order = _get_vertex_order(mesh)
-    faces = mesh[1]
+    faces: np.ndarray = mesh[1]
 
     closest_pts = find_closest_points_on_mesh(points, mesh)
 
@@ -208,7 +225,7 @@ def map_points_via_mesh(
             index_points = index_points[mask]
 
         # do the actual point -> supervoxel lookup (this is the slow part)
-        scatter_df = scattered_points(lookup_points, cv, client)
+        scatter_df = scattered_points(lookup_points, cv, client, root_id=root_id)
         scatter_df = scatter_df.reset_index()
         scatter_df["point_index"] = missing_point_ids[index_points]
 
