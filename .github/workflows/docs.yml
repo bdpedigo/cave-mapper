@@ -1,0 +1,43 @@
+name: Build and Deploy Docs
+
+on:
+  # run this workflow when dev checks pass
+  push:
+    branches:
+      - main
+
+jobs:
+  # This workflow contains a single job called "docs"
+  docs:
+    name: Build and deploy docs
+
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.11"]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Get repo
+        uses: actions/checkout@v4
+
+      - name: Get gh-pages branch
+        run: git fetch origin gh-pages --depth=1
+
+      - name: Configure git for github-actions[bot]
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Install uv
+        id: setup-uv
+        uses: astral-sh/setup-uv@v2
+        with:
+          version: "0.5.2"
+
+      - name: Set up Python
+        run: uv sync --python ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uvx --from poethepoet poe doc-push
