@@ -223,16 +223,8 @@ def map_points_via_mesh(
         min_idx = valid_scatter_df.groupby(["point_index"])["distance"].idxmin()
         info.append(valid_scatter_df.loc[min_idx])
 
-        #     .idxmin()
-
-        # current_point_mapping = (
-        #     valid_scatter_df.reset_index()
-        #     .set_index(["x", "y", "z"])
-        #     .groupby(["point_index"])["distance"]
-        #     .idxmin()
-        # ).to_dict()
-
         # inject current mapping into mapping
+        # TODO this should be a set
         point_mapping.update(min_idx.to_dict())
         mapping_keys = list(point_mapping.keys())
         missing_point_ids = np.setdiff1d(
