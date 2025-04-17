@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://bdpedigo.github.io/"
+Homepage = "https://bdpedigo.github.io/cave-mapper/"
 Repository = "https://github.com/bdpedigo/cave-mapper.git"
 Issues = "https://github.com/bdpedigo/cave-mapper/issues"
 
