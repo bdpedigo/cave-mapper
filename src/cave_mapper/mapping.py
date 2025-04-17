@@ -236,7 +236,7 @@ def map_points_via_mesh(
         distance += 1
 
     info = pd.concat(info)
-    info = info.set_index("point_index").sort_index()
+    info = info.set_index("point_index").reindex(np.arange(len(closest_pts)))
 
     info["query_pt_x"] = points[:, 0]
     info["query_pt_y"] = points[:, 1]
