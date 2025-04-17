@@ -1,11 +1,12 @@
 [project]
 name = "cave-mapper"
 version = "0.1.0"
-description = "Add your description here"
+description = "Tools for mapping between objects and representations in the CAVE ecosystem"
 readme = "README.md"
 authors = [
     { name = "Ben Pedigo", email = "benjamindpedigo@gmail.com" }
 ]
+license = "MIT"
 requires-python = ">=3.10,<3.13"
 dependencies = [
     "caveclient[cv]>=7.7.0",
@@ -14,6 +15,10 @@ dependencies = [
     "point-cloud-utils>=0.34.0",
 ]
 
+[project.urls]
+Homepage = "https://bdpedigo.github.io/"
+Repository = "https://github.com/bdpedigo/cave-mapper.git"
+Issues = "https://github.com/bdpedigo/cave-mapper/issues"
 
 [build-system]
 requires = ["hatchling"]
