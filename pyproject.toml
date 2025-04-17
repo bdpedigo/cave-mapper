@@ -35,6 +35,7 @@ dev = [
     "mkdocstrings[crystal,python]>=0.29.1",
     "mknotebooks>=0.8.0",
     "pymdown-extensions>=10.14.3",
+    "markdown-include>=0.8.1",
 ]
 
 
