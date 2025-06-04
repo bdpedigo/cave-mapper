@@ -308,7 +308,7 @@ def map_points(
     verbose=False,
 ) -> pd.DataFrame:
     """
-    Map points in space to a mesh and then to voxels and their corresponding supervoxels.
+    Map points in space to voxels and their corresponding supervoxels.
 
     Parameters
     ----------
@@ -319,6 +319,8 @@ def map_points(
         The root id of the object to map to.
     client :
         The CAVEclient object to use for mapping.
+    initial_distance :
+        The initial distance to search for a mapping. Default is 0. Units are in voxels.
     max_distance :
         The maximum distance to search for a mapping. Default is 4. Units are in voxels.
     verbose :
@@ -331,16 +333,12 @@ def map_points(
         following columns:
 
         - `query_pt_x`, `query_pt_y`, `query_pt_z`: The original points in space.
-        - `mesh_pt_x`, `mesh_pt_y`, `mesh_pt_z`: The closest points on the mesh.
         - `voxel_pt_x`, `voxel_pt_y`, `voxel_pt_z`: The corresponding voxel coordinates.
             Units are the same as `client.chunkedgraph.base_resolution`.
         - `supervoxel_id`: The supervoxel id of the corresponding voxel.
         - `root_id`: The root id of the object.
-        - `query_mesh_distance_nm`: The distance from the original point to the closest
-            point on the mesh.
-        - `mesh_voxel_distance_nm`: The distance from the closest point on the mesh to
-            the corresponding voxel.
-
+        - `query_voxel_distance_nm`: The distance from the original point to the 
+           closest voxel that is part of the object.
     """
     cv: CloudVolume = client.info.segmentation_cloudvolume(progress=verbose)
 
