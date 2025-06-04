@@ -297,3 +297,125 @@ def map_points_via_mesh(
     ]
 
     return info
+
+
+def map_points(
+    points: np.ndarray,
+    root_id: int,
+    client: CAVEclient,
+    initial_distance: int = 0,
+    max_distance: int = 4,
+    verbose=False,
+) -> pd.DataFrame:
+    """
+    Map points in space to a mesh and then to voxels and their corresponding supervoxels.
+
+    Parameters
+    ----------
+    points :
+        Array of points in space to be mapped. Must be of shape (n_points, 3), and
+        are assumed to be in coordinates of nanometers.
+    root_id :
+        The root id of the object to map to.
+    client :
+        The CAVEclient object to use for mapping.
+    max_distance :
+        The maximum distance to search for a mapping. Default is 4. Units are in voxels.
+    verbose :
+        Whether to print progress messages.
+
+    Returns
+    -------
+    :
+        A DataFrame containing the mapping information. The DataFrame will have the
+        following columns:
+
+        - `query_pt_x`, `query_pt_y`, `query_pt_z`: The original points in space.
+        - `mesh_pt_x`, `mesh_pt_y`, `mesh_pt_z`: The closest points on the mesh.
+        - `voxel_pt_x`, `voxel_pt_y`, `voxel_pt_z`: The corresponding voxel coordinates.
+            Units are the same as `client.chunkedgraph.base_resolution`.
+        - `supervoxel_id`: The supervoxel id of the corresponding voxel.
+        - `root_id`: The root id of the object.
+        - `query_mesh_distance_nm`: The distance from the original point to the closest
+            point on the mesh.
+        - `mesh_voxel_distance_nm`: The distance from the closest point on the mesh to
+            the corresponding voxel.
+
+    """
+    cv: CloudVolume = client.info.segmentation_cloudvolume(progress=verbose)
+
+    res = np.array(cv.meta.resolution(0))
+
+    cast_closest_points = cast_points_to_chunked(points, cv)
+
+    distance = initial_distance
+
+    point_mapping = {}
+    info = []
+    missing_point_ids = np.arange(len(cast_closest_points))
+    while len(point_mapping) < len(points) and distance <= max_distance:
+        missing_points = cast_closest_points[missing_point_ids]
+
+        # find the k-vertex neighbors of the missing points
+        neighbors = construct_neighbor_elements(distance, distance, distance)
+        lookup_points, index_points = construct_lookup_points(missing_points, neighbors)
+
+        # do the actual point -> supervoxel lookup (this is the slow part)
+        scatter_df = scattered_points(lookup_points, cv, client, root_id=root_id)
+        scatter_df = scatter_df.reset_index()
+        scatter_df["point_index"] = missing_point_ids[index_points]
+
+        scatter_df["distance"] = np.linalg.norm(
+            scatter_df.reset_index()[["x", "y", "z"]].values * res
+            - points[scatter_df["point_index"]],
+            axis=1,
+        )
+
+        valid_scatter_df = scatter_df[scatter_df["root_id"] == root_id]
+
+        min_idx = valid_scatter_df.groupby(["point_index"])["distance"].idxmin()
+        info.append(valid_scatter_df.loc[min_idx])
+
+        # inject current mapping into mapping
+        # TODO this should be a set
+        point_mapping.update(min_idx.to_dict())
+        mapping_keys = list(point_mapping.keys())
+        missing_point_ids = np.setdiff1d(
+            np.arange(len(cast_closest_points)), mapping_keys
+        )
+
+        # missing_points = cast_closest_points[missing_keys]
+
+        distance += 1
+
+    info = pd.concat(info)
+    info = info.set_index("point_index").reindex(np.arange(len(points)))
+
+    info["query_pt_x"] = points[:, 0]
+    info["query_pt_y"] = points[:, 1]
+    info["query_pt_z"] = points[:, 2]
+
+    info = info.rename(
+        columns={
+            "x": "voxel_pt_x",
+            "y": "voxel_pt_y",
+            "z": "voxel_pt_z",
+            "distance": "query_voxel_distance_nm",
+        }
+    )
+
+    info = info[
+        [
+            "query_pt_x",
+            "query_pt_y",
+            "query_pt_z",
+            "voxel_pt_x",
+            "voxel_pt_y",
+            "voxel_pt_z",
+            "supervoxel_id",
+            "root_id",
+            "query_voxel_distance_nm",
+        ]
+    ]
+
+    return info
