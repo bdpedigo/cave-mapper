@@ -26,4 +26,6 @@ uv add install cave-mapper
 
 ## Available Functions
 
+- `map_points`: This takes points, and a root ID (likely points annotated inside an object) and maps them to voxels/supervoxel IDs that are guaranteed to be part of the root ID. This is useful for mapping points to a specific object in a 3D space.
+
 - `map_points_via_mesh`: This takes points and a root ID (likely points that were annotated on the surface of that object) and maps them to voxels/supervoxel IDs that are guaranteed to be part of the root ID.
