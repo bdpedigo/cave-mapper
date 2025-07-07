@@ -46,6 +46,8 @@ def cast_points_to_chunked(points: np.ndarray, cv: CloudVolume) -> np.ndarray:
     Cast points to the chunked representation of the mesh.
     """
     points = np.array(points, dtype=np.float32)
+    if np.isnan(points).any():
+        raise ValueError("Points contain NaN values, which cannot be used for mapping.")
     points_cast = points / np.array(cv.meta.resolution(0))
     points_cast = np.round(points_cast).astype(int)
     return points_cast
@@ -337,10 +339,12 @@ def map_points(
             Units are the same as `client.chunkedgraph.base_resolution`.
         - `supervoxel_id`: The supervoxel id of the corresponding voxel.
         - `root_id`: The root id of the object.
-        - `query_voxel_distance_nm`: The distance from the original point to the 
+        - `query_voxel_distance_nm`: The distance from the original point to the
            closest voxel that is part of the object.
     """
-    cv: CloudVolume = client.info.segmentation_cloudvolume(progress=verbose)
+    cv: CloudVolume = client.info.segmentation_cloudvolume(
+        progress=verbose, lru_bytes=1e8
+    )
 
     res = np.array(cv.meta.resolution(0))
 
