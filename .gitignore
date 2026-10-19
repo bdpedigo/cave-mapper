@@ -11,3 +11,4 @@ wheels/
 
 # Docs
 site
+.DS_Store
