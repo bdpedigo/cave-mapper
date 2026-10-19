@@ -38,12 +38,12 @@ jobs:
 
       - name: Install uv
         id: setup-uv
-        uses: astral-sh/setup-uv@v2
-        with:
-          version: "0.5.2"
+        uses: astral-sh/setup-uv@v5
 
+      # --locked fails on a lock that no longer matches pyproject.toml, so the docs
+      # build never re-resolves to untested versions.
       - name: Set up Python
-        run: uv sync --python ${{ matrix.python-version }}
+        run: uv sync --locked --python ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: uvx --from poethepoet poe doc-push
