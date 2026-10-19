@@ -41,6 +41,75 @@ def find_closest_points_on_mesh(points: np.ndarray, mesh: tuple) -> np.ndarray:
     return closest_pts
 
 
+def _root_timestamp(client: CAVEclient, root_id: int):
+    """A time at which `root_id` is valid: the end of its lifetime, or now if it is
+    still the latest root. Any time in that window gives the same `get_roots`."""
+    return client.chunkedgraph.get_root_timestamps(root_id, latest=True)[0]
+
+
+def mesh_point_offset(cv: CloudVolume) -> np.ndarray:
+    """
+    The offset, in nanometers, to add to a point taken from a mesh before looking
+    up the voxel that holds it.
+
+    Meshes are built from a downsampled segmentation (the mesh "mip") and sit half
+    a voxel of that mip off the voxel grid. This returns that half voxel,
+    `resolution(mesh_mip) / 2`.
+
+    Measured on MICrONS (`minnie65_phase3_v1`, mesh mip 2): the shift is about
+    (15, 8, 19) nm, against (16, 16, 20) from this rule. With the rule and
+    `convention="floor"`, deep points inside spine meshes landed on the root
+    100% and 99.8% of the time on three cells, against 96% to 98% for medoids
+    with `round`. On H01 (`h01_c3_flat`, mesh mip 2) the measured shift is about
+    (3, 6, 15) nm, against (16, 16, 16.5). The rule still gave 99.58% there,
+    against 99.68% for the measured offset and 99.34% for none.
+
+    Parameters
+    ----------
+    cv :
+        The segmentation CloudVolume. Its mesh info must name the mesh `mip`.
+
+    Returns
+    -------
+    :
+        Array of shape (3,), in nanometers.
+    """
+    info = cv.mesh.meta.info
+    if "mip" not in info:
+        raise ValueError(
+            "The mesh info of this CloudVolume names no 'mip', so the mesh offset "
+            "is unknown; pass point_offset explicitly."
+        )
+    return np.asarray(cv.meta.resolution(info["mip"]), dtype=float) / 2
+
+
+def points_to_voxels(
+    points: np.ndarray, resolution: np.ndarray, convention: str = "round"
+) -> np.ndarray:
+    """
+    Convert points in nanometers to mip-0 voxel indices.
+
+    `convention="floor"` is the voxel that holds the point: voxel `i` covers
+    `[i * res, (i + 1) * res)`. CloudVolume, Neuroglancer and the CAVE
+    materialization engine all use it. `convention="round"` is the older behavior
+    of this package, which treats `i * res` as the voxel center.
+    """
+    if convention not in ("floor", "round"):
+        raise ValueError(f"convention must be 'floor' or 'round', not {convention!r}")
+    points = np.asarray(points, dtype=float)
+    if np.isnan(points).any():
+        raise ValueError("Points contain NaN values, which cannot be used for mapping.")
+    scaled = points / np.asarray(resolution, dtype=float)
+    rounded = np.floor(scaled) if convention == "floor" else np.round(scaled)
+    return rounded.astype(np.int64)
+
+
+def shell_offsets(distance: int) -> np.ndarray:
+    """The voxel offsets at exactly Chebyshev distance `distance` from the origin."""
+    cube = construct_neighbor_elements(distance, distance, distance)
+    return cube[np.abs(cube).max(axis=1) == distance]
+
+
 def cast_points_to_chunked(points: np.ndarray, cv: CloudVolume) -> np.ndarray:
     """
     Cast points to the chunked representation of the mesh.
@@ -58,6 +127,7 @@ def scattered_points(
     cv: CloudVolume,
     client: CAVEclient,
     root_id: Optional[int] = None,
+    timestamp=None,
 ) -> pd.DataFrame:
     out = cv.scattered_points(
         points, coord_resolution=cv.meta.resolution(0), agglomerate=False
@@ -78,11 +148,8 @@ def scattered_points(
         .drop(columns=["point"])
     )
 
-    # TODO add a timestamp lookup here and pass it into get_roots
-    if root_id is not None:
-        timestamp = client.chunkedgraph.get_root_timestamps(root_id, latest=True)[0]
-    else:
-        timestamp = None
+    if timestamp is None and root_id is not None:
+        timestamp = _root_timestamp(client, root_id)
 
     root_lookups = client.chunkedgraph.get_roots(
         scatter_df["supervoxel_id"].values, timestamp=timestamp
@@ -193,6 +260,7 @@ def map_points_via_mesh(
     closest_pts = find_closest_points_on_mesh(points, mesh)
 
     cast_closest_points = cast_points_to_chunked(closest_pts, cv)
+    timestamp = _root_timestamp(client, root_id)
 
     distance = 1
 
@@ -227,7 +295,9 @@ def map_points_via_mesh(
             index_points = index_points[mask]
 
         # do the actual point -> supervoxel lookup (this is the slow part)
-        scatter_df = scattered_points(lookup_points, cv, client, root_id=root_id)
+        scatter_df = scattered_points(
+            lookup_points, cv, client, root_id=root_id, timestamp=timestamp
+        )
         scatter_df = scatter_df.reset_index()
         scatter_df["point_index"] = missing_point_ids[index_points]
 
@@ -308,9 +378,24 @@ def map_points(
     initial_distance: int = 0,
     max_distance: int = 4,
     verbose=False,
+    *,
+    point_offset=None,
+    convention: str = "round",
+    timestamp=None,
+    lru_bytes: int = int(1e8),
 ) -> pd.DataFrame:
     """
     Map points in space to voxels and their corresponding supervoxels.
+
+    Each point goes to a voxel (see `convention`). If that voxel is not part of
+    `root_id`, the search grows one voxel shell at a time, up to `max_distance`,
+    and keeps the nearest voxel of the root in the first shell that holds one.
+
+    The chunkedgraph calls use the client's own retry settings. For long runs, raise
+    them before building the client, for example
+    `caveclient.set_session_defaults(max_retries=10, backoff_factor=1,
+    backoff_max=240, status_forcelist=(429, 500, 502, 503, 504))`. The
+    segmentation reads are retried by CloudFiles.
 
     Parameters
     ----------
@@ -327,97 +412,133 @@ def map_points(
         The maximum distance to search for a mapping. Default is 4. Units are in voxels.
     verbose :
         Whether to print progress messages.
+    point_offset :
+        Nanometers added to every point before the voxel conversion. `None` adds
+        nothing. `"mesh"` adds [mesh_point_offset][cave_mapper.mesh_point_offset],
+        for points taken from the object's mesh, which sits half a mesh voxel off
+        the voxel grid.
+    convention :
+        How a point becomes a voxel. `"floor"` is the voxel that holds the point,
+        as CloudVolume and the CAVE materialization engine do it. `"round"` (the
+        default, for backward compatibility) treats `i * res` as the voxel center.
+    timestamp :
+        The time for the `get_roots` calls. `None` uses the end of the root's
+        lifetime (or now, for a latest root), so any time the root is valid gives
+        the same answer.
+    lru_bytes :
+        Size of the CloudVolume chunk cache. Points close together share chunks.
 
     Returns
     -------
     :
-        A DataFrame containing the mapping information. The DataFrame will have the
-        following columns:
+        A DataFrame with one row per point, in the input order. A point with no
+        voxel of the root within `max_distance` has nulls. Columns:
 
         - `query_pt_x`, `query_pt_y`, `query_pt_z`: The original points in space.
         - `voxel_pt_x`, `voxel_pt_y`, `voxel_pt_z`: The corresponding voxel coordinates.
             Units are the same as `client.chunkedgraph.base_resolution`.
+        - `anchor_pt_x`, `anchor_pt_y`, `anchor_pt_z`: The voxel's minimum corner in
+            nanometers, `voxel * resolution`. A floor lookup of this point, as the
+            materialization engine does it, returns the same voxel at any
+            annotation resolution that divides the segmentation resolution.
         - `supervoxel_id`: The supervoxel id of the corresponding voxel.
         - `root_id`: The root id of the object.
-        - `query_voxel_distance_nm`: The distance from the original point to the
-           closest voxel that is part of the object.
+        - `query_voxel_distance_nm`: The distance from the offset point to the
+           center of the chosen voxel (under `convention`).
+        - `search_distance`: The shell the voxel was found in, in voxels. 0 means
+           the point's own voxel.
     """
     cv: CloudVolume = client.info.segmentation_cloudvolume(
-        progress=verbose, lru_bytes=1e8
+        progress=verbose, lru_bytes=lru_bytes
     )
+    res = np.asarray(cv.meta.resolution(0), dtype=float)
+    points = np.asarray(points, dtype=float).reshape(-1, 3)
+    n_points = len(points)
 
-    res = np.array(cv.meta.resolution(0))
+    if point_offset is None:
+        offset = np.zeros(3)
+    elif isinstance(point_offset, str):
+        if point_offset != "mesh":
+            raise ValueError(
+                f"point_offset must be None, 'mesh' or 3 numbers, not {point_offset!r}"
+            )
+        offset = mesh_point_offset(cv)
+    else:
+        offset = np.asarray(point_offset, dtype=float).reshape(3)
+    query = points + offset
+    voxels = points_to_voxels(query, res, convention)
+    # Where a voxel's center sits, in voxels, under each convention.
+    center_shift = 0.5 if convention == "floor" else 0.0
 
-    cast_closest_points = cast_points_to_chunked(points, cv)
+    if timestamp is None:
+        timestamp = _root_timestamp(client, root_id)
 
-    distance = initial_distance
-
-    point_mapping = {}
-    info = []
-    missing_point_ids = np.arange(len(cast_closest_points))
-    while len(point_mapping) < len(points) and distance <= max_distance:
-        missing_points = cast_closest_points[missing_point_ids]
-
-        # find the k-vertex neighbors of the missing points
-        neighbors = construct_neighbor_elements(distance, distance, distance)
-        lookup_points, index_points = construct_lookup_points(missing_points, neighbors)
+    best_voxel = np.zeros((n_points, 3), dtype=np.int64)
+    best_svid = np.zeros(n_points, dtype=np.int64)
+    best_distance = np.full(n_points, np.nan)
+    best_shell = np.full(n_points, -1, dtype=np.int64)
+    remaining = np.arange(n_points)
+    for distance in range(initial_distance, max_distance + 1):
+        if len(remaining) == 0:
+            break
+        # The first pass looks at the whole cube; later passes only at the new shell,
+        # since every voxel inside it already missed.
+        if distance == initial_distance:
+            offsets = construct_neighbor_elements(distance, distance, distance)
+        else:
+            offsets = shell_offsets(distance)
+        candidates = (voxels[remaining][:, None, :] + offsets[None, :, :]).reshape(
+            -1, 3
+        )
+        owner = np.repeat(remaining, len(offsets))
 
         # do the actual point -> supervoxel lookup (this is the slow part)
-        scatter_df = scattered_points(lookup_points, cv, client, root_id=root_id)
-        scatter_df = scatter_df.reset_index()
-        scatter_df["point_index"] = missing_point_ids[index_points]
-
-        scatter_df["distance"] = np.linalg.norm(
-            scatter_df.reset_index()[["x", "y", "z"]].values * res
-            - points[scatter_df["point_index"]],
-            axis=1,
+        lookup = cv.scattered_points(
+            candidates, coord_resolution=res, agglomerate=False
         )
+        svids = np.array([lookup[tuple(v)] for v in candidates], dtype=np.int64)
+        unique_svids, inverse = np.unique(svids, return_inverse=True)
+        unique_roots = np.zeros(len(unique_svids), dtype=np.int64)
+        nonzero = unique_svids != 0
+        if nonzero.any():
+            unique_roots[nonzero] = client.chunkedgraph.get_roots(
+                unique_svids[nonzero], timestamp=timestamp
+            )
+        valid = unique_roots[inverse.ravel()] == root_id
 
-        valid_scatter_df = scatter_df[scatter_df["root_id"] == root_id]
+        dists = np.linalg.norm((candidates + center_shift) * res - query[owner], axis=1)
+        dists[~valid] = np.inf
+        order = np.lexsort((dists, owner))
+        first = np.ones(len(order), dtype=bool)
+        first[1:] = owner[order][1:] != owner[order][:-1]
+        winners = order[first & np.isfinite(dists[order])]
+        found = owner[winners]
+        best_voxel[found] = candidates[winners]
+        best_svid[found] = svids[winners]
+        best_distance[found] = dists[winners]
+        best_shell[found] = distance
+        remaining = np.setdiff1d(remaining, found)
 
-        min_idx = valid_scatter_df.groupby(["point_index"])["distance"].idxmin()
-        info.append(valid_scatter_df.loc[min_idx])
+    found = best_shell >= 0
 
-        # inject current mapping into mapping
-        # TODO this should be a set
-        point_mapping.update(min_idx.to_dict())
-        mapping_keys = list(point_mapping.keys())
-        missing_point_ids = np.setdiff1d(
-            np.arange(len(cast_closest_points)), mapping_keys
-        )
+    def masked(values: np.ndarray) -> pd.arrays.IntegerArray:
+        out = pd.array(values, dtype="Int64")
+        out[~found] = pd.NA
+        return out
 
-        # missing_points = cast_closest_points[missing_keys]
-
-        distance += 1
-
-    info = pd.concat(info)
-    info = info.set_index("point_index").reindex(np.arange(len(points)))
-
-    info["query_pt_x"] = points[:, 0]
-    info["query_pt_y"] = points[:, 1]
-    info["query_pt_z"] = points[:, 2]
-
-    info = info.rename(
-        columns={
-            "x": "voxel_pt_x",
-            "y": "voxel_pt_y",
-            "z": "voxel_pt_z",
-            "distance": "query_voxel_distance_nm",
+    info = pd.DataFrame(
+        {
+            "query_pt_x": points[:, 0],
+            "query_pt_y": points[:, 1],
+            "query_pt_z": points[:, 2],
         }
     )
-
-    info = info[
-        [
-            "query_pt_x",
-            "query_pt_y",
-            "query_pt_z",
-            "voxel_pt_x",
-            "voxel_pt_y",
-            "voxel_pt_z",
-            "supervoxel_id",
-            "root_id",
-            "query_voxel_distance_nm",
-        ]
-    ]
-
+    for i, axis in enumerate("xyz"):
+        info[f"voxel_pt_{axis}"] = masked(best_voxel[:, i])
+    for i, axis in enumerate("xyz"):
+        info[f"anchor_pt_{axis}"] = np.where(found, best_voxel[:, i] * res[i], np.nan)
+    info["supervoxel_id"] = masked(best_svid)
+    info["root_id"] = masked(np.full(n_points, root_id, dtype=np.int64))
+    info["query_voxel_distance_nm"] = best_distance
+    info["search_distance"] = masked(best_shell)
     return info
