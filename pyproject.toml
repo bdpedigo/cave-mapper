@@ -38,6 +38,12 @@ dev = [
 ]
 
 
+[tool.uv]
+# The same cutoff as the maintainer's global uv config. The lock records it, so it
+# must live in the project too, or `uv sync --locked` fails wherever that global
+# config is absent (CI).
+exclude-newer = "14 days"
+
 [tool.poe.tasks]
 doc-build = "mkdocs build"
 doc-push = "mkdocs gh-deploy --force --remote-branch gh-pages --remote-name origin"
